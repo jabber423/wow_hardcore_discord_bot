@@ -552,6 +552,7 @@ def build_level_message(
     char_class: str,
 ) -> str:
     return (
+        f"<@&1523790776130343146>\n"
         f"🎉 {mention} **leveled up!**\n"
         f"**{character}** on **{realm}** is now level **{new_level}**.\n"
         f"`{old_level} → {new_level}` | {race} {char_class}"
@@ -561,7 +562,8 @@ def build_level_message(
 def build_death_message(mention:str, display_name: str, character: str, realm: str, level: Optional[int]) -> str:
     level_text = level if level is not None else "unknown"
     return (
-        f"💀 **Hardcore death detected.**\n"
+        f"<@&1523790776130343146>\n"
+        f"💀 **Hardcore death detected.** 💀\n"
         f"**{mention}'s** character **{character}** on **{realm}** "
         f"is showing as ghost/dead.\n"
         f"Last known level: **{level_text}**\n"
@@ -653,7 +655,7 @@ def run_poll_cycle_sync(announce_first_seen: bool = False) -> list[str]:
                 # if new_professions:
                     # for prof in new_professions.values():
                         # print(f"    {format_profession_line(prof)}")
-                # else:
+                # else:https://discord.com/channels/1314020978891685888/1523399292289679480/1523792758463266998
                     # print("    No professions returned.")
 
                 # if old_professions:
@@ -823,7 +825,17 @@ async def on_ready() -> None:
 # =============================================================================
 # Slash commands
 # =============================================================================
-
+@bot.tree.command(name="roleid", description="Get the ID for a Discord role.")
+@app_commands.describe(role="Pick the role")
+async def roleid(interaction: discord.Interaction, role: discord.Role) -> None:
+    await interaction.response.send_message(
+        f"Role: {role.mention}\n"
+        f"Role name: `{role.name}`\n"
+        f"Role ID: `{role.id}`\n\n"
+        f'Windows cmd:\n'
+        f'```bat\nset "HC_ROLE_ID={role.id}"\n```',
+        ephemeral=True,
+    )
 
 @bot.tree.command(name="registerhc", description="Register your Hardcore Classic challenge character.")
 @app_commands.describe(
