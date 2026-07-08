@@ -51,7 +51,7 @@ REGION = os.getenv("BNET_REGION", "us")
 LOCALE = os.getenv("BNET_LOCALE", "en_US")
 DEFAULT_REALM = os.getenv("HC_DEFAULT_REALM", "doomhowl")
 
-POLL_INTERVAL_SECONDS = int(os.getenv("HC_POLL_INTERVAL_SECONDS", "60"))
+POLL_INTERVAL_SECONDS = int(os.getenv("HC_POLL_INTERVAL_SECONDS", "300"))
 DELAY_BETWEEN_PLAYERS_SECONDS = float(os.getenv("HC_DELAY_BETWEEN_PLAYERS_SECONDS", "1.0"))
 
 # Character/profile endpoints must use profile-* namespaces.
@@ -563,7 +563,7 @@ def build_death_message(mention:str, display_name: str, character: str, realm: s
     level_text = level if level is not None else "unknown"
     return (
         f"<@&1523790776130343146>\n"
-        f"💀 **Hardcore death detected.** 💀\n"
+        f"💀 **Hardcore death detected** 💀\n"
         f"**{mention}'s** character **{character}** on **{realm}** "
         f"is showing as ghost/dead.\n"
         f"Last known level: **{level_text}**\n"
