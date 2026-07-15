@@ -22,10 +22,10 @@ A Discord bot that tracks World of Warcraft Hardcore characters using the Blizza
 3. Run the bot:
 
    ```bash
-   python your_bot_script.py
+   python hc_bot_tracker.py
    ```
 
-Replace `your_bot_script.py` with the name of the bot's Python file.
+Replace `hc_bot_tracker.py` with the name of the bot's Python file.
 
 ---
 
