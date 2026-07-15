@@ -36,6 +36,8 @@ import discord
 import requests
 from discord import app_commands
 
+from urllib.parse import urlencode, quote
+
 
 DB_PATH = os.getenv("HC_DB_PATH", "hc_players.db")
 
@@ -49,16 +51,16 @@ BNET_CLIENT_SECRET = os.getenv("BNET_CLIENT_SECRET")
 
 REGION = os.getenv("BNET_REGION", "us")
 LOCALE = os.getenv("BNET_LOCALE", "en_US")
-DEFAULT_REALM = os.getenv("HC_DEFAULT_REALM", "doomhowl")
+DEFAULT_REALM = os.getenv("HC_DEFAULT_REALM", "defias pillager")
 
 POLL_INTERVAL_SECONDS = int(os.getenv("HC_POLL_INTERVAL_SECONDS", "300"))
 DELAY_BETWEEN_PLAYERS_SECONDS = float(os.getenv("HC_DELAY_BETWEEN_PLAYERS_SECONDS", "1.0"))
 
 # Character/profile endpoints must use profile-* namespaces.
 PROFILE_NAMESPACES = [
-    "profile-classicann-us",  # Anniversary / Doomhowl-style realms, Dreamscythe TBC Anniversary
+    #"profile-classicann-us",  # Anniversary / Doomhowl-style realms, Dreamscythe TBC Anniversary
     "profile-classic1x-us",   # Classic Era / Hardcore fallback
-    # "profile-classic-us",     # Classic progression fallback
+    #"profile-classic-us",     # Classic progression fallback
 ]
 
 
@@ -67,7 +69,7 @@ def utc_now() -> str:
 
 
 def normalize(value: str) -> str:
-    return value.strip().lower()
+    return value.strip().lower().replace(" ", "-")
 
 
 def int_or_none(value: Optional[str]) -> Optional[int]:
@@ -176,7 +178,8 @@ def load_active_players() -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def find_active_player_by_user(discord_user_id: str) -> Optional[sqlite3.Row]:
+def find_active_players_by_user(discord_user_id: str) -> list[sqlite3.Row]:
+    """Return every active Hardcore character registered to one Discord user."""
     with get_db() as conn:
         return conn.execute(
             """
@@ -184,10 +187,29 @@ def find_active_player_by_user(discord_user_id: str) -> Optional[sqlite3.Row]:
             FROM hc_players
             WHERE discord_user_id = ?
               AND active = 1
-            ORDER BY id DESC
-            LIMIT 1;
+            ORDER BY created_at, realm, character_name;
             """,
             (discord_user_id,),
+        ).fetchall()
+
+
+def find_active_character(
+    discord_user_id: str,
+    character_name: str,
+    realm: str,
+) -> Optional[sqlite3.Row]:
+    with get_db() as conn:
+        return conn.execute(
+            """
+            SELECT *
+            FROM hc_players
+            WHERE discord_user_id = ?
+              AND character_name = ?
+              AND realm = ?
+              AND active = 1
+            LIMIT 1;
+            """,
+            (discord_user_id, normalize(character_name), normalize(realm)),
         ).fetchone()
 
 
@@ -202,6 +224,16 @@ def register_player(
     now = utc_now()
 
     with get_db() as conn:
+        conn.execute(
+            """
+            UPDATE hc_players
+            SET discord_display_name = ?,
+                updated_at = ?
+            WHERE discord_user_id = ?;
+            """,
+            (discord_display_name, now, discord_user_id),
+        )
+
         existing_claim = conn.execute(
             """
             SELECT *
@@ -222,28 +254,33 @@ def register_player(
                 f"**{existing_claim['discord_display_name']}**.",
             )
 
-        existing_user = find_active_player_by_user(discord_user_id)
+        existing_character = conn.execute(
+            """
+            SELECT *
+            FROM hc_players
+            WHERE discord_user_id = ?
+              AND character_name = ?
+              AND realm = ?
+            LIMIT 1;
+            """,
+            (discord_user_id, character_name, realm),
+        ).fetchone()
 
-        if existing_user:
+        if existing_character:
+            # Re-enable the same character if it had previously been unregistered.
+            # Do not erase its last-known level/death history.
             conn.execute(
                 """
                 UPDATE hc_players
                 SET discord_display_name = ?,
-                    character_name = ?,
-                    realm = ?,
-                    last_level = NULL,
-                    last_is_ghost = NULL,
-                    last_namespace = NULL,
-                    last_api_status = NULL,
-                    last_error = NULL,
-                    last_checked = NULL,
-                    last_professions_json = NULL,
+                    active = 1,
                     updated_at = ?
                 WHERE id = ?;
                 """,
-                (discord_display_name, character_name, realm, now, existing_user["id"]),
+                (discord_display_name, now, existing_character["id"]),
             )
         else:
+            # One Discord user may own many rows/characters.
             conn.execute(
                 """
                 INSERT INTO hc_players (
@@ -270,7 +307,12 @@ def register_player(
     return True, f"✅ Registered **{discord_display_name}** as **{character_name}** on **{realm}**."
 
 
-def unregister_player(discord_user_id: str) -> bool:
+def unregister_player(
+    discord_user_id: str,
+    character_name: str,
+    realm: str,
+) -> bool:
+    """Stop tracking one character without removing the user's other characters."""
     with get_db() as conn:
         result = conn.execute(
             """
@@ -278,9 +320,16 @@ def unregister_player(discord_user_id: str) -> bool:
             SET active = 0,
                 updated_at = ?
             WHERE discord_user_id = ?
+              AND character_name = ?
+              AND realm = ?
               AND active = 1;
             """,
-            (utc_now(), discord_user_id),
+            (
+                utc_now(),
+                discord_user_id,
+                normalize(character_name),
+                normalize(realm),
+            ),
         )
     return result.rowcount > 0
 
@@ -368,6 +417,7 @@ def get_access_token() -> str:
 
 def blizzard_get(token: str, path: str, namespace: str) -> requests.Response:
     url = f"https://{REGION}.api.blizzard.com{path}"
+    print(url)
     return requests.get(
         url,
         headers={"Authorization": f"Bearer {token}"},
@@ -396,6 +446,7 @@ def fetch_profile_any_namespace(
         response = get_character_profile(token, realm, character, namespace)
 
         if response.status_code == 200:
+            print(response.json())
             return response.json(), namespace, 200, None
 
         if response.status_code == 429:
@@ -871,63 +922,83 @@ async def registerhc(
     )
 
 
-@bot.tree.command(name="unregisterhc", description="Remove your Hardcore character from tracking.")
-async def unregisterhc(interaction: discord.Interaction) -> None:
+@bot.tree.command(name="unregisterhc", description="Remove one Hardcore character from tracking.")
+@app_commands.describe(
+    character_name="The Hardcore character to stop tracking",
+    realm="Realm name",
+)
+async def unregisterhc(
+    interaction: discord.Interaction,
+    character_name: str,
+    realm: Optional[str] = DEFAULT_REALM,
+) -> None:
     if await reject_wrong_channel(interaction):
         return
 
-    removed = unregister_player(str(interaction.user.id))
+    character_name = normalize(character_name)
+    realm = normalize(realm or DEFAULT_REALM)
+    removed = unregister_player(str(interaction.user.id), character_name, realm)
 
     if not removed:
         await interaction.response.send_message(
-            "You do not have an active Hardcore character registered.",
+            f"You do not have an active character named **{character_name}** on **{realm}**.",
             ephemeral=True,
         )
         return
 
     await interaction.response.send_message(
-        f"🗑️ Removed **{interaction.user.display_name}** from Hardcore tracking.",
+        f"🗑️ Stopped tracking **{character_name}** on **{realm}** for "
+        f"**{interaction.user.display_name}**.",
         ephemeral=False,
     )
 
 
-@bot.tree.command(name="myhc", description="Show your registered Hardcore character.")
+@bot.tree.command(name="myhc", description="Show all your registered Hardcore characters.")
 async def myhc(interaction: discord.Interaction) -> None:
     if await reject_wrong_channel(interaction):
         return
 
-    row = find_active_player_by_user(str(interaction.user.id))
+    rows = find_active_players_by_user(str(interaction.user.id))
 
-    if not row:
+    if not rows:
         await interaction.response.send_message(
-            "You do not have an active Hardcore character registered.",
+            "You do not have any active Hardcore characters registered.",
             ephemeral=True,
         )
         return
 
-    level = row["last_level"] if row["last_level"] is not None else "unknown"
-    api_status = row["last_api_status"] if row["last_api_status"] is not None else "not checked yet"
-    ghost_note = " 💀" if row["last_is_ghost"] == 1 else ""
+    lines = [f"📌 **{interaction.user.display_name}'s Hardcore characters:**"]
+    for row in rows:
+        level = row["last_level"] if row["last_level"] is not None else "?"
+        ghost_note = " 💀" if row["last_is_ghost"] == 1 else ""
+        lines.append(
+            f"• **{row['character_name']}** on **{row['realm']}** — "
+            f"level **{level}**{ghost_note}"
+        )
 
-    await interaction.response.send_message(
-        f"📌 You are registered as **{row['character_name']}** on **{row['realm']}**.\n"
-        f"Last known level: **{level}**{ghost_note}\n"
-        f"API status: `{api_status}`\n"
-        f"Last checked: `{row['last_checked'] or 'never'}`",
-        ephemeral=True,
-    )
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
-@bot.tree.command(name="mytradeskills", description="Show your last known Hardcore tradeskills.")
-async def mytradeskills(interaction: discord.Interaction) -> None:
+@bot.tree.command(name="mytradeskills", description="Show one character's last known Hardcore tradeskills.")
+@app_commands.describe(character_name="Your Hardcore character", realm="Realm name")
+async def mytradeskills(
+    interaction: discord.Interaction,
+    character_name: str,
+    realm: Optional[str] = DEFAULT_REALM,
+) -> None:
     if await reject_wrong_channel(interaction):
         return
 
-    row = find_active_player_by_user(str(interaction.user.id))
+    row = find_active_character(
+        str(interaction.user.id),
+        character_name,
+        realm or DEFAULT_REALM,
+    )
 
     if not row:
         await interaction.response.send_message(
-            "You do not have an active Hardcore character registered.",
+            f"You do not have an active **{normalize(character_name)}** on "
+            f"**{normalize(realm or DEFAULT_REALM)}**.",
             ephemeral=True,
         )
         return
@@ -953,7 +1024,7 @@ async def mytradeskills(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(message, ephemeral=True)
 
 
-@bot.tree.command(name="hclist", description="List registered Hardcore challenge characters.")
+@bot.tree.command(name="hclist", description="List Hardcore characters grouped by Discord member.")
 async def hclist(interaction: discord.Interaction) -> None:
     if await reject_wrong_channel(interaction):
         return
@@ -964,36 +1035,41 @@ async def hclist(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("No Hardcore characters are registered yet.", ephemeral=True)
         return
 
-    lines: list[str] = []
-
+    # Group all character rows under their one Discord account.
+    grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
-        level = row["last_level"] if row["last_level"] is not None else "?"
-        status = row["last_api_status"] if row["last_api_status"] is not None else "not checked"
-        ghost = " 💀" if row["last_is_ghost"] == 1 else ""
-        profs = safe_json_loads(row["last_professions_json"])
-
-        profession_summary = ""
-        if profs:
-            simple_profs = []
-            for prof in profs.values():
-                profession = prof.get("profession", "Unknown")
-                skill = prof.get("skill_points")
-                max_skill = prof.get("max_skill_points")
-                if skill is not None and max_skill is not None:
-                    simple_profs.append(f"{profession} {skill}/{max_skill}")
-                elif skill is not None:
-                    simple_profs.append(f"{profession} {skill}")
-                else:
-                    simple_profs.append(profession)
-            profession_summary = " | " + ", ".join(simple_profs[:4])
-
-        lines.append(
-            f"**{row['discord_display_name']}** — "
-            f"`{row['character_name']}` on `{row['realm']}` "
-            f"level **{level}**{ghost} "
-            # f"`API: {status}`"
-            f"{profession_summary}"
+        user_id = row["discord_user_id"]
+        group = grouped.setdefault(
+            user_id,
+            {
+                "display_name": row["discord_display_name"],
+                "characters": [],
+            },
         )
+        # Keep the newest stored Discord display name for every line in the group.
+        group["display_name"] = row["discord_display_name"]
+        group["characters"].append(row)
+
+    lines: list[str] = []
+    sorted_groups = sorted(
+        grouped.values(),
+        key=lambda group: str(group["display_name"]).lower(),
+    )
+
+    for group in sorted_groups:
+        lines.append(f"**{group['display_name']}**")
+        characters = sorted(
+            group["characters"],
+            key=lambda row: (row["realm"].lower(), row["character_name"].lower()),
+        )
+
+        for row in characters:
+            level = row["last_level"] if row["last_level"] is not None else "?"
+            ghost = " 💀" if row["last_is_ghost"] == 1 else ""
+            lines.append(
+                f"  ↳ `{row['character_name']}` on `{row['realm']}` "
+                f"level **{level}**{ghost}"
+            )
 
     message = "\n".join(lines)
     if len(message) > 1900:
