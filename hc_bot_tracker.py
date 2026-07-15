@@ -36,8 +36,6 @@ import discord
 import requests
 from discord import app_commands
 
-from urllib.parse import urlencode, quote
-
 
 DB_PATH = os.getenv("HC_DB_PATH", "hc_players.db")
 
@@ -54,13 +52,15 @@ LOCALE = os.getenv("BNET_LOCALE", "en_US")
 DEFAULT_REALM = os.getenv("HC_DEFAULT_REALM", "defias pillager")
 
 POLL_INTERVAL_SECONDS = int(os.getenv("HC_POLL_INTERVAL_SECONDS", "300"))
-DELAY_BETWEEN_PLAYERS_SECONDS = float(os.getenv("HC_DELAY_BETWEEN_PLAYERS_SECONDS", "1.0"))
+DELAY_BETWEEN_PLAYERS_SECONDS = float(
+    os.getenv("HC_DELAY_BETWEEN_PLAYERS_SECONDS", "1.0")
+)
 
 # Character/profile endpoints must use profile-* namespaces.
 PROFILE_NAMESPACES = [
-    #"profile-classicann-us",  # Anniversary / Doomhowl-style realms, Dreamscythe TBC Anniversary
-    "profile-classic1x-us",   # Classic Era / Hardcore fallback
-    #"profile-classic-us",     # Classic progression fallback
+    # "profile-classicann-us",  # Anniversary / Dreamscythe TBC Anniversary
+    "profile-classic1x-us",  # Classic Era / Hardcore Doomhowl, Defias Pillager
+    # "profile-classic-us",     # Classic progression MoP
 ]
 
 
@@ -159,11 +159,17 @@ def init_db() -> None:
         ensure_column(conn, "hc_players", "last_api_status", "last_api_status INTEGER")
         ensure_column(conn, "hc_players", "last_error", "last_error TEXT")
         ensure_column(conn, "hc_players", "last_checked", "last_checked TEXT")
-        ensure_column(conn, "hc_players", "last_professions_json", "last_professions_json TEXT")
+        ensure_column(
+            conn, "hc_players", "last_professions_json", "last_professions_json TEXT"
+        )
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_active ON hc_players(active);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_user ON hc_players(discord_user_id);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_char ON hc_players(character_name, realm);")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_hc_user ON hc_players(discord_user_id);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_hc_char ON hc_players(character_name, realm);"
+        )
 
 
 def load_active_players() -> list[sqlite3.Row]:
@@ -301,10 +307,20 @@ def register_player(
                 )
                 VALUES (?, ?, ?, ?, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?);
                 """,
-                (discord_user_id, discord_display_name, character_name, realm, now, now),
+                (
+                    discord_user_id,
+                    discord_display_name,
+                    character_name,
+                    realm,
+                    now,
+                    now,
+                ),
             )
 
-    return True, f"✅ Registered **{discord_display_name}** as **{character_name}** on **{realm}**."
+    return (
+        True,
+        f"✅ Registered **{discord_display_name}** as **{character_name}** on **{realm}**.",
+    )
 
 
 def unregister_player(
@@ -338,15 +354,12 @@ def update_player_success(
     player_id: int,
     profile: dict[str, Any],
     namespace: str,
-    professions: Optional[dict[str, Any]],
 ) -> None:
     level = profile.get("level")
     is_ghost = profile.get("is_ghost", None)
     api_name = normalize(profile.get("name", ""))
 
     professions_json = None
-    if professions is not None:
-        professions_json = json.dumps(professions, sort_keys=True)
 
     with get_db() as conn:
         conn.execute(
@@ -376,7 +389,9 @@ def update_player_success(
         )
 
 
-def update_player_failure(player_id: int, status_code: int, error: Optional[str]) -> None:
+def update_player_failure(
+    player_id: int, status_code: int, error: Optional[str]
+) -> None:
     with get_db() as conn:
         conn.execute(
             """
@@ -426,14 +441,10 @@ def blizzard_get(token: str, path: str, namespace: str) -> requests.Response:
     )
 
 
-def get_character_profile(token: str, realm: str, character: str, namespace: str) -> requests.Response:
+def get_character_profile(
+    token: str, realm: str, character: str, namespace: str
+) -> requests.Response:
     path = f"/profile/wow/character/{normalize(realm)}/{normalize(character)}"
-    return blizzard_get(token, path, namespace)
-
-
-def get_character_professions(token: str, realm: str, character: str, namespace: str) -> requests.Response:
-    # TODO: professions doesn't exist in classic
-    path = f"/profile/wow/character/{normalize(realm)}/{normalize(character)}/professions"
     return blizzard_get(token, path, namespace)
 
 
@@ -464,134 +475,10 @@ def fetch_profile_any_namespace(
 
 
 # =============================================================================
-# Tradeskills / professions
-# =============================================================================
-
-
-def parse_professions(professions_response: Optional[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    if not professions_response:
-        return {}
-
-    parsed: dict[str, dict[str, Any]] = {}
-
-    sections = [
-        ("primary", professions_response.get("primaries", [])),
-        ("secondary", professions_response.get("secondaries", [])),
-    ]
-
-    for category, entries in sections:
-        if not isinstance(entries, list):
-            continue
-
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-
-            profession_name = (
-                entry.get("profession", {}).get("name")
-                or entry.get("name")
-                or "Unknown Profession"
-            )
-
-            skill_tiers = entry.get("skill_tiers", [])
-
-            if skill_tiers and isinstance(skill_tiers, list):
-                for tier_entry in skill_tiers:
-                    if not isinstance(tier_entry, dict):
-                        continue
-
-                    tier_name = (
-                        tier_entry.get("tier", {}).get("name")
-                        or tier_entry.get("name")
-                        or "Unknown Tier"
-                    )
-                    skill_points = tier_entry.get("skill_points")
-                    max_skill_points = tier_entry.get("max_skill_points")
-                    key = f"{category}:{profession_name}:{tier_name}"
-                    parsed[key] = {
-                        "category": category,
-                        "profession": profession_name,
-                        "tier": tier_name,
-                        "skill_points": skill_points,
-                        "max_skill_points": max_skill_points,
-                    }
-            else:
-                tier_name = entry.get("tier", {}).get("name") or "No Tier"
-                skill_points = entry.get("skill_points")
-                max_skill_points = entry.get("max_skill_points")
-                key = f"{category}:{profession_name}:{tier_name}"
-                parsed[key] = {
-                    "category": category,
-                    "profession": profession_name,
-                    "tier": tier_name,
-                    "skill_points": skill_points,
-                    "max_skill_points": max_skill_points,
-                }
-
-    return parsed
-
-
-def format_profession_line(prof: dict[str, Any]) -> str:
-    profession = prof.get("profession", "Unknown")
-    tier = prof.get("tier", "Unknown Tier")
-    skill = prof.get("skill_points")
-    max_skill = prof.get("max_skill_points")
-
-    if skill is not None and max_skill is not None:
-        return f"{profession} ({tier}) {skill}/{max_skill}"
-    if skill is not None:
-        return f"{profession} ({tier}) {skill}"
-    return f"{profession} ({tier})"
-
-
-def compare_professions(old_professions: dict[str, Any], new_professions: dict[str, Any]) -> list[str]:
-    changes: list[str] = []
-
-    for key, new_prof in new_professions.items():
-        old_prof = old_professions.get(key)
-
-        if old_prof is None:
-            changes.append(f"learned/tracked **{format_profession_line(new_prof)}**")
-            continue
-
-        old_skill = old_prof.get("skill_points")
-        new_skill = new_prof.get("skill_points")
-
-        if isinstance(old_skill, int) and isinstance(new_skill, int) and new_skill != old_skill:
-            delta = new_skill - old_skill
-            sign = "+" if delta > 0 else ""
-            changes.append(
-                f"**{new_prof.get('profession', 'Unknown')}** changed "
-                f"`{old_skill} → {new_skill}` `({sign}{delta})`"
-            )
-
-    for key, old_prof in old_professions.items():
-        if key not in new_professions:
-            changes.append(f"no longer shows **{format_profession_line(old_prof)}**")
-
-    return changes
-
-
-# =============================================================================
 # Discord message builders
 # =============================================================================
 
 
-# def build_level_message(
-    # display_name: str,
-    # character: str,
-    # realm: str,
-    # old_level: int,
-    # new_level: int,
-    # race: str,
-    # char_class: str,
-# ) -> str:
-    # return (
-        # f"🎉 **{display_name}'s Hardcore character leveled up!**\n"
-        # f"**{character}** on **{realm}** is now level **{new_level}**.\n"
-        # f"`{old_level} → {new_level}` | {race} {char_class}"
-    # )
-    
 def build_level_message(
     mention: str,
     display_name: str,
@@ -610,7 +497,9 @@ def build_level_message(
     )
 
 
-def build_death_message(mention:str, display_name: str, character: str, realm: str, level: Optional[int]) -> str:
+def build_death_message(
+    mention: str, display_name: str, character: str, realm: str, level: Optional[int]
+) -> str:
     level_text = level if level is not None else "unknown"
     return (
         f"<@&1523790776130343146>\n"
@@ -619,17 +508,6 @@ def build_death_message(mention:str, display_name: str, character: str, realm: s
         f"is showing as ghost/dead.\n"
         f"Last known level: **{level_text}**\n"
         f"\n:saluting_face:"
-    )
-
-
-def build_profession_message(display_name: str, character: str, realm: str, changes: list[str]) -> str:
-    change_text = "\n".join(f"- {change}" for change in changes)
-    if len(change_text) > 1600:
-        change_text = change_text[:1550] + "\n- ...trimmed..."
-    return (
-        f"🛠️ **{display_name}'s tradeskills changed!**\n"
-        f"**{character}** on **{realm}**\n"
-        f"{change_text}"
     )
 
 
@@ -673,11 +551,12 @@ def run_poll_cycle_sync(announce_first_seen: bool = False) -> list[str]:
         mention = f"<@{discord_user_id}>"
         old_level = player["last_level"]
         old_is_ghost = player["last_is_ghost"]
-        old_professions = safe_json_loads(player["last_professions_json"])
 
         print(f"Checking {character} on {realm}...")
 
-        profile, namespace, status_code, error = fetch_profile_any_namespace(token, realm, character)
+        profile, namespace, status_code, error = fetch_profile_any_namespace(
+            token, realm, character
+        )
 
         if profile is None:
             print(f"  API failed: {status_code} {error}")
@@ -691,57 +570,46 @@ def run_poll_cycle_sync(announce_first_seen: bool = False) -> list[str]:
         char_class = profile.get("character_class", {}).get("name", "Unknown")
         is_ghost = profile.get("is_ghost", None)
 
-        print(f"  Found {api_name}: level {new_level} {race} {char_class} namespace={namespace}")
+        print(
+            f"  Found {api_name}: level {new_level} {race} {char_class} namespace={namespace}"
+        )
 
-        new_professions: Optional[dict[str, Any]] = None
-        # profession_changes: list[str] = []
-
-        # if namespace:
-            # professions_response = get_character_professions(token, realm, character, namespace)
-
-            # if professions_response.status_code == 200:
-                # new_professions = parse_professions(professions_response.json())
-
-                # print("  Professions:")
-                # if new_professions:
-                    # for prof in new_professions.values():
-                        # print(f"    {format_profession_line(prof)}")
-                # else:https://discord.com/channels/1314020978891685888/1523399292289679480/1523792758463266998
-                    # print("    No professions returned.")
-
-                # if old_professions:
-                    # profession_changes = compare_professions(old_professions, new_professions)
-                # else:
-                    # print("  Profession baseline saved.")
-            # else:
-                # print(
-                    # f"  Professions failed: {professions_response.status_code} "
-                    # f"{professions_response.text[:300]}"
-                # )
-
-        update_player_success(player_id, profile, namespace or "Unknown", new_professions)
+        update_player_success(player_id, profile, namespace or "Unknown")
 
         if old_level is None:
             print("  Level baseline saved.")
             if announce_first_seen:
                 messages.append(
-                    build_first_seen_message(display_name, api_name, realm, new_level, race, char_class)
+                    build_first_seen_message(
+                        display_name, api_name, realm, new_level, race, char_class
+                    )
                 )
-        elif isinstance(old_level, int) and isinstance(new_level, int) and new_level > old_level:
+        elif (
+            isinstance(old_level, int)
+            and isinstance(new_level, int)
+            and new_level > old_level
+        ):
             print(f"  LEVEL UP: {old_level} -> {new_level}")
             messages.append(
-                build_level_message(mention, display_name, api_name, realm, old_level, new_level, race, char_class)
+                build_level_message(
+                    mention,
+                    display_name,
+                    api_name,
+                    realm,
+                    old_level,
+                    new_level,
+                    race,
+                    char_class,
+                )
             )
         else:
             print("  No level change.")
 
-        # if profession_changes:
-            # print(f"  Profession changes: {len(profession_changes)}")
-            # messages.append(build_profession_message(display_name, api_name, realm, profession_changes))
-
         if is_ghost is True and old_is_ghost != 1:
             print("  GHOST/DEAD detected.")
-            messages.append(build_death_message(mention, display_name, api_name, realm, new_level))
+            messages.append(
+                build_death_message(mention, display_name, api_name, realm, new_level)
+            )
 
         time.sleep(DELAY_BETWEEN_PLAYERS_SECONDS)
 
@@ -771,7 +639,9 @@ class HCBot(discord.Client):
             print(f"Slash commands synced to guild {guild_id}.")
         else:
             await self.tree.sync()
-            print("Slash commands synced globally. Global commands can take a while to appear.")
+            print(
+                "Slash commands synced globally. Global commands can take a while to appear."
+            )
 
         if self.poll_task is None:
             self.poll_task = asyncio.create_task(poll_loop())
@@ -798,27 +668,6 @@ async def reject_wrong_channel(interaction: discord.Interaction) -> bool:
     return True
 
 
-# async def send_announcement(message: str) -> None:
-    # channel_id = int_or_none(HC_ANNOUNCE_CHANNEL_ID)
-
-    # if channel_id is None:
-        # print("No HC_ANNOUNCE_CHANNEL_ID or HC_ALLOWED_CHANNEL_ID set. Cannot post:")
-        # print(message)
-        # return
-
-    # try:
-        # channel = bot.get_channel(channel_id)
-        # if channel is None:
-            # channel = await bot.fetch_channel(channel_id)
-
-        # if not hasattr(channel, "send"):
-            # print("Announcement channel does not support sending messages.")
-            # return
-
-        # await channel.send(message)
-    # except Exception as error:
-        # print(f"Failed to send announcement: {error}")
-        
 async def send_announcement(message: str) -> None:
     channel_id = int_or_none(HC_ANNOUNCE_CHANNEL_ID)
 
@@ -883,12 +732,15 @@ async def roleid(interaction: discord.Interaction, role: discord.Role) -> None:
         f"Role: {role.mention}\n"
         f"Role name: `{role.name}`\n"
         f"Role ID: `{role.id}`\n\n"
-        f'Windows cmd:\n'
+        f"Windows cmd:\n"
         f'```bat\nset "HC_ROLE_ID={role.id}"\n```',
         ephemeral=True,
     )
 
-@bot.tree.command(name="registerhc", description="Register your Hardcore Classic challenge character.")
+
+@bot.tree.command(
+    name="registerhc", description="Register your Hardcore Classic challenge character."
+)
 @app_commands.describe(
     character_name="Your Hardcore character name",
     realm="Realm name. Default is doomhowl.",
@@ -905,7 +757,9 @@ async def registerhc(
     realm = normalize(realm or DEFAULT_REALM)
 
     if not character_name:
-        await interaction.response.send_message("Character name cannot be blank.", ephemeral=True)
+        await interaction.response.send_message(
+            "Character name cannot be blank.", ephemeral=True
+        )
         return
 
     display_name = getattr(interaction.user, "display_name", interaction.user.name)
@@ -917,12 +771,19 @@ async def registerhc(
     )
 
     await interaction.response.send_message(
-        message + ("\nThe tracker will start watching them on the next poll." if success else ""),
+        message
+        + (
+            "\nThe tracker will start watching them on the next poll."
+            if success
+            else ""
+        ),
         ephemeral=not success,
     )
 
 
-@bot.tree.command(name="unregisterhc", description="Remove one Hardcore character from tracking.")
+@bot.tree.command(
+    name="unregisterhc", description="Remove one Hardcore character from tracking."
+)
 @app_commands.describe(
     character_name="The Hardcore character to stop tracking",
     realm="Realm name",
@@ -953,7 +814,9 @@ async def unregisterhc(
     )
 
 
-@bot.tree.command(name="myhc", description="Show all your registered Hardcore characters.")
+@bot.tree.command(
+    name="myhc", description="Show all your registered Hardcore characters."
+)
 async def myhc(interaction: discord.Interaction) -> None:
     if await reject_wrong_channel(interaction):
         return
@@ -979,52 +842,9 @@ async def myhc(interaction: discord.Interaction) -> None:
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
-@bot.tree.command(name="mytradeskills", description="Show one character's last known Hardcore tradeskills.")
-@app_commands.describe(character_name="Your Hardcore character", realm="Realm name")
-async def mytradeskills(
-    interaction: discord.Interaction,
-    character_name: str,
-    realm: Optional[str] = DEFAULT_REALM,
-) -> None:
-    if await reject_wrong_channel(interaction):
-        return
-
-    row = find_active_character(
-        str(interaction.user.id),
-        character_name,
-        realm or DEFAULT_REALM,
-    )
-
-    if not row:
-        await interaction.response.send_message(
-            f"You do not have an active **{normalize(character_name)}** on "
-            f"**{normalize(realm or DEFAULT_REALM)}**.",
-            ephemeral=True,
-        )
-        return
-
-    professions = safe_json_loads(row["last_professions_json"])
-
-    if not professions:
-        await interaction.response.send_message(
-            "No tradeskill data has been saved yet. Wait for the next successful poll.",
-            ephemeral=True,
-        )
-        return
-
-    lines = [f"**{format_profession_line(prof)}**" for prof in professions.values()]
-    message = (
-        f"🛠️ Tradeskills for **{row['character_name']}** on **{row['realm']}**:\n"
-        + "\n".join(lines)
-    )
-
-    if len(message) > 1900:
-        message = message[:1850] + "\n...trimmed..."
-
-    await interaction.response.send_message(message, ephemeral=True)
-
-
-@bot.tree.command(name="hclist", description="List Hardcore characters grouped by Discord member.")
+@bot.tree.command(
+    name="hclist", description="List Hardcore characters grouped by Discord member."
+)
 async def hclist(interaction: discord.Interaction) -> None:
     if await reject_wrong_channel(interaction):
         return
@@ -1032,7 +852,9 @@ async def hclist(interaction: discord.Interaction) -> None:
     rows = load_active_players()
 
     if not rows:
-        await interaction.response.send_message("No Hardcore characters are registered yet.", ephemeral=True)
+        await interaction.response.send_message(
+            "No Hardcore characters are registered yet.", ephemeral=True
+        )
         return
 
     # Group all character rows under their one Discord account.
@@ -1078,16 +900,24 @@ async def hclist(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(message, ephemeral=False)
 
 
-@bot.tree.command(name="pollhc", description="Manually run one Hardcore tracker poll now.")
-@app_commands.describe(announce_first_seen="If true, announce newly baselined characters too.")
-async def pollhc(interaction: discord.Interaction, announce_first_seen: Optional[bool] = False) -> None:
+@bot.tree.command(
+    name="pollhc", description="Manually run one Hardcore tracker poll now."
+)
+@app_commands.describe(
+    announce_first_seen="If true, announce newly baselined characters too."
+)
+async def pollhc(
+    interaction: discord.Interaction, announce_first_seen: Optional[bool] = False
+) -> None:
     if await reject_wrong_channel(interaction):
         return
 
     await interaction.response.defer(ephemeral=True)
 
     try:
-        messages = await asyncio.to_thread(run_poll_cycle_sync, bool(announce_first_seen))
+        messages = await asyncio.to_thread(
+            run_poll_cycle_sync, bool(announce_first_seen)
+        )
         for message in messages:
             await send_announcement(message)
 
