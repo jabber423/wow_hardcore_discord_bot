@@ -958,14 +958,14 @@ async def hclist(interaction: discord.Interaction) -> None:
         group["display_name"] = row["discord_display_name"]
         group["characters"].append(row)
 
-    lines: list[str] = []
+    group_blocks: list[str] = []
     sorted_groups = sorted(
         grouped.values(),
         key=lambda group: str(group["display_name"]).lower(),
     )
 
     for group in sorted_groups:
-        lines.append(f"**{group['display_name']}**")
+        group_lines = [f"**{group['display_name']}**"]
         characters = sorted(
             group["characters"],
             key=lambda row: (row["realm"].lower(), row["character_name"].lower()),
@@ -984,17 +984,38 @@ async def hclist(interaction: discord.Interaction) -> None:
             else:
                 self_found = "?"
 
-            lines.append(
+            group_lines.append(
                 f"  ↳ `{row['character_name']}` — "
                 f"level **{level}** | {gender} {race} {char_class} | "
                 f"Self-Found: {self_found}{ghost}"
             )
 
-    message = "\n".join(lines)
-    if len(message) > 1900:
-        message = message[:1850] + "\n...list trimmed..."
+        group_blocks.append("\n".join(group_lines))
 
-    await interaction.response.send_message(message, ephemeral=False)
+    # Discord messages are limited to 2,000 characters. Keep each message below
+    # 1,900 characters and split between Discord-member groups when possible.
+    messages: list[str] = []
+    current_blocks: list[str] = []
+    current_length = 0
+
+    for block in group_blocks:
+        separator_length = 1 if current_blocks else 0
+        proposed_length = current_length + separator_length + len(block)
+
+        if current_blocks and proposed_length > 1900:
+            messages.append("\n".join(current_blocks))
+            current_blocks = [block]
+            current_length = len(block)
+        else:
+            current_blocks.append(block)
+            current_length = proposed_length
+
+    if current_blocks:
+        messages.append("\n".join(current_blocks))
+
+    await interaction.response.send_message(messages[0], ephemeral=False)
+    for message in messages[1:]:
+        await interaction.followup.send(message, ephemeral=False)
 
 
 @bot.tree.command(
