@@ -139,7 +139,11 @@ def init_db() -> None:
                 active INTEGER NOT NULL DEFAULT 1,
 
                 last_level INTEGER,
+                last_race TEXT,
+                last_class TEXT,
+                last_gender TEXT,
                 last_is_ghost INTEGER,
+                last_is_self_found INTEGER,
                 last_namespace TEXT,
                 last_api_status INTEGER,
                 last_error TEXT,
@@ -154,7 +158,16 @@ def init_db() -> None:
 
         # Safe migrations if you already created an older hc_players.db.
         ensure_column(conn, "hc_players", "last_level", "last_level INTEGER")
+        ensure_column(conn, "hc_players", "last_race", "last_race TEXT")
+        ensure_column(conn, "hc_players", "last_class", "last_class TEXT")
+        ensure_column(conn, "hc_players", "last_gender", "last_gender TEXT")
         ensure_column(conn, "hc_players", "last_is_ghost", "last_is_ghost INTEGER")
+        ensure_column(
+            conn,
+            "hc_players",
+            "last_is_self_found",
+            "last_is_self_found INTEGER",
+        )
         ensure_column(conn, "hc_players", "last_namespace", "last_namespace TEXT")
         ensure_column(conn, "hc_players", "last_api_status", "last_api_status INTEGER")
         ensure_column(conn, "hc_players", "last_error", "last_error TEXT")
@@ -163,12 +176,49 @@ def init_db() -> None:
             conn, "hc_players", "last_professions_json", "last_professions_json TEXT"
         )
 
+        # Clean up any active duplicates created by an older version of the bot.
+        # The newest active row is kept; older duplicate names are deactivated.
+        active_rows = conn.execute(
+            """
+            SELECT id, character_name
+            FROM hc_players
+            WHERE active = 1
+            ORDER BY updated_at DESC, id DESC;
+            """
+        ).fetchall()
+
+        seen_character_names: set[str] = set()
+        for row in active_rows:
+            character_key = normalize(row["character_name"])
+            if character_key in seen_character_names:
+                conn.execute(
+                    """
+                    UPDATE hc_players
+                    SET active = 0,
+                        updated_at = ?
+                    WHERE id = ?;
+                    """,
+                    (utc_now(), row["id"]),
+                )
+            else:
+                seen_character_names.add(character_key)
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_active ON hc_players(active);")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_hc_user ON hc_players(discord_user_id);"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_hc_char ON hc_players(character_name, realm);"
+        )
+        # Enforce one active row per normalized character name, regardless of realm.
+        # Drop the older index definition first so this migration is repeatable.
+        conn.execute("DROP INDEX IF EXISTS ux_hc_active_character_name;")
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX ux_hc_active_character_name
+            ON hc_players(LOWER(REPLACE(TRIM(character_name), ' ', '-')))
+            WHERE active = 1;
+            """
         )
 
 
@@ -240,24 +290,24 @@ def register_player(
             (discord_display_name, now, discord_user_id),
         )
 
-        existing_claim = conn.execute(
+        # Character names are unique among active tracked characters.
+        # The realm is intentionally not part of this check.
+        existing_active = conn.execute(
             """
             SELECT *
             FROM hc_players
-            WHERE character_name = ?
-              AND realm = ?
+            WHERE LOWER(REPLACE(TRIM(character_name), ' ', '-')) = ?
               AND active = 1
-              AND discord_user_id != ?
             LIMIT 1;
             """,
-            (character_name, realm, discord_user_id),
+            (character_name,),
         ).fetchone()
 
-        if existing_claim:
+        if existing_active:
             return (
                 False,
-                f"`{character_name}` on `{realm}` is already registered by "
-                f"**{existing_claim['discord_display_name']}**.",
+                f"`{character_name}` is already being tracked for "
+                f"**{existing_active['discord_display_name']}**.",
             )
 
         existing_character = conn.execute(
@@ -265,8 +315,9 @@ def register_player(
             SELECT *
             FROM hc_players
             WHERE discord_user_id = ?
-              AND character_name = ?
-              AND realm = ?
+              AND character_name = ? COLLATE NOCASE
+              AND realm = ? COLLATE NOCASE
+            ORDER BY updated_at DESC, id DESC
             LIMIT 1;
             """,
             (discord_user_id, character_name, realm),
@@ -287,35 +338,47 @@ def register_player(
             )
         else:
             # One Discord user may own many rows/characters.
-            conn.execute(
-                """
-                INSERT INTO hc_players (
-                    discord_user_id,
-                    discord_display_name,
-                    character_name,
-                    realm,
-                    active,
-                    last_level,
-                    last_is_ghost,
-                    last_namespace,
-                    last_api_status,
-                    last_error,
-                    last_checked,
-                    last_professions_json,
-                    created_at,
-                    updated_at
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO hc_players (
+                        discord_user_id,
+                        discord_display_name,
+                        character_name,
+                        realm,
+                        active,
+                        last_level,
+                        last_race,
+                        last_class,
+                        last_gender,
+                        last_is_ghost,
+                        last_is_self_found,
+                        last_namespace,
+                        last_api_status,
+                        last_error,
+                        last_checked,
+                        last_professions_json,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        ?, ?, ?, ?, 1,
+                        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                        ?, ?
+                    );
+                    """,
+                    (
+                        discord_user_id,
+                        discord_display_name,
+                        character_name,
+                        realm,
+                        now,
+                        now,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?);
-                """,
-                (
-                    discord_user_id,
-                    discord_display_name,
-                    character_name,
-                    realm,
-                    now,
-                    now,
-                ),
-            )
+            except sqlite3.IntegrityError:
+                # Protect against two registrations happening at nearly the same time.
+                return False, f"`{character_name}` is already being tracked."
 
     return (
         True,
@@ -356,7 +419,11 @@ def update_player_success(
     namespace: str,
 ) -> None:
     level = profile.get("level")
+    race = profile.get("race", {}).get("name", "Unknown")
+    char_class = profile.get("character_class", {}).get("name", "Unknown")
+    gender = profile.get("gender", {}).get("name", "Unknown")
     is_ghost = profile.get("is_ghost", None)
+    is_self_found = profile.get("is_self_found", None)
     api_name = normalize(profile.get("name", ""))
 
     professions_json = None
@@ -367,7 +434,11 @@ def update_player_success(
             UPDATE hc_players
             SET character_name = COALESCE(NULLIF(?, ''), character_name),
                 last_level = ?,
+                last_race = ?,
+                last_class = ?,
+                last_gender = ?,
                 last_is_ghost = ?,
+                last_is_self_found = ?,
                 last_namespace = ?,
                 last_api_status = 200,
                 last_error = NULL,
@@ -379,7 +450,11 @@ def update_player_success(
             (
                 api_name,
                 level,
+                race,
+                char_class,
+                gender,
                 bool_to_db(is_ghost),
+                bool_to_db(is_self_found),
                 namespace,
                 utc_now(),
                 professions_json,
@@ -396,13 +471,24 @@ def update_player_failure(
         conn.execute(
             """
             UPDATE hc_players
-            SET last_api_status = ?,
+            SET last_level = CASE
+                    WHEN ? = 404 THEN NULL
+                    ELSE last_level
+                END,
+                last_api_status = ?,
                 last_error = ?,
                 last_checked = ?,
                 updated_at = ?
             WHERE id = ?;
             """,
-            (status_code, shorten(error, 500), utc_now(), utc_now(), player_id),
+            (
+                status_code,
+                status_code,
+                shorten(error, 500),
+                utc_now(),
+                utc_now(),
+                player_id,
+            ),
         )
 
 
@@ -887,10 +973,21 @@ async def hclist(interaction: discord.Interaction) -> None:
 
         for row in characters:
             level = row["last_level"] if row["last_level"] is not None else "?"
+            race = row["last_race"] or "?"
+            char_class = row["last_class"] or "?"
+            gender = row["last_gender"] or "?"
             ghost = " 💀" if row["last_is_ghost"] == 1 else ""
+            if row["last_is_self_found"] == 1:
+                self_found = "✅"
+            elif row["last_is_self_found"] == 0:
+                self_found = "❌"
+            else:
+                self_found = "?"
+
             lines.append(
-                f"  ↳ `{row['character_name']}` on `{row['realm']}` "
-                f"level **{level}**{ghost}"
+                f"  ↳ `{row['character_name']}` — "
+                f"level **{level}** | {gender} {race} {char_class} | "
+                f"Self-Found: {self_found}{ghost}"
             )
 
     message = "\n".join(lines)
